@@ -1,64 +1,87 @@
 package store.order;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.Base64;
+import java.util.ArrayList;
 import java.util.List;
-import java.util.stream.StreamSupport;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
-import store.order.Order;
+import store.product.ProductController;
+import store.product.ProductOut;
 
 @Service
 public class OrderService {
 
-    private Logger logger = LoggerFactory.getLogger(OrderService.class);
+  @Autowired
+  private OrderRepository orderRepository;
 
-    @Autowired
-    private OrderRepository orderRepository;
+  @Autowired
+  private ProductController productController;
 
-    public Order create(Order order) {
-        if (null == order.password()) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                "Password is mandatory!"
-            );
-        }
-        if (null == order.email()) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                "Email is mandatory!"
-            );
-        }
-
-        if (orderRepository.findByEmail(order.email()) != null)
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                "Email already have been registered!"
-            );
-
-        return orderRepository.save(
-            new OrderModel(order)
-        ).to();
+  @Transactional
+  public OrderOut create(OrderIn in, String idAccount) {
+    if (in == null || in.items() == null || in.items().isEmpty()) {
+      throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Items are mandatory");
     }
 
-    public List<Order> findAll() {
-        return StreamSupport.stream(
-            orderRepository.findAll().spliterator(), false)
-            .map(OrderModel::to)
-            .toList();
-    }
+    List<ProductOut> products = new ArrayList<>();
+    in.items().forEach(it -> {
+      ProductOut p = productController.findById(it.idProduct()).getBody();
+      if (p == null) {
+        throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Product not found: " + it.idProduct());
+      }
+      products.add(p);
+    });
 
-    public Order findById(String id) {
-        return orderRepository.findById(id).map(OrderModel::to).orElse(null);
-    }
+    OrderModel om = OrderParser.toModel(in, idAccount);
 
-    public void delete(String id) {
-        orderRepository.delete(new OrderModel().id(id));
+    double orderTotal = 0.0;
+    for (int i = 0; i < in.items().size(); i++) {
+      var inItem = in.items().get(i);
+      var product = products.get(i);
+
+      double total = product.price() * inItem.quantity();
+
+      OrderItemModel im = new OrderItemModel();
+      im.setOrder(om);
+      im.setIdProduct(inItem.idProduct());
+      im.setQuantity(inItem.quantity());
+      im.setTotal(total);
+
+      om.getItems().add(im);
+      orderTotal += total;
     }
-    
+    om.setTotal(orderTotal);
+
+    OrderModel saved = orderRepository.save(om);
+    return OrderParser.toOut(saved, products);
+  }
+
+  public List<OrderOut> findAll(String idAccount) {
+    var list = orderRepository.findAllByIdAccount(idAccount);
+    // Para listar rápido, não precisamos montar os produtos: retornamos sem detalhes de produto
+    return list.stream()
+      .map(om -> OrderOut.builder()
+        .id(om.getId())
+        .date(om.getDate().toString())
+        .items(null) // lista resumida
+        .total(om.getTotal())
+        .build())
+      .toList();
+  }
+
+  public OrderOut findById(String id, String idAccount) {
+    OrderModel om = orderRepository.findByIdAndIdAccount(id, idAccount)
+      .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Order not found"));
+
+    // carrega os produtos dos itens desse pedido
+    List<ProductOut> products = om.getItems().stream()
+        .map(it -> productController.findById(it.getIdProduct()).getBody())
+        .toList();
+
+    return OrderParser.toOut(om, products);
+  }
 }
