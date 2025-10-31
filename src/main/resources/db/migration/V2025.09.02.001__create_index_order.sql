@@ -1,1 +1,0 @@
-CREATE INDEX order_email_idx ON orders (email);
